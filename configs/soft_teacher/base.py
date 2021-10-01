@@ -203,7 +203,8 @@ test_pipeline = [
         ],
     ),
 ]
-data_root = 'C:/Users/Alex/WorkSpace/dataset/coco/'
+
+data_root = 'C:/Users/Alex/WorkSpace/dataset/VOCdevkit/'
 data = dict(
     samples_per_gpu=None,
     workers_per_gpu=None,
@@ -211,13 +212,13 @@ data = dict(
         _delete_=True,
         type="SemiDataset",
         sup=dict(
-            type="CocoDataset",
+            type="VOCDataset",
             ann_file=None,
             img_prefix=None,
             pipeline=train_pipeline,
         ),
         unsup=dict(
-            type="CocoDataset",
+            type="VOCDataset",
             ann_file=None,
             img_prefix=None,
             pipeline=unsup_pipeline,
