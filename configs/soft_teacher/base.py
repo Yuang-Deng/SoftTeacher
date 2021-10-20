@@ -14,7 +14,12 @@ model = dict(
         init_cfg=dict(
             type="Pretrained", checkpoint="open-mmlab://detectron2/resnet50_caffe"
         ),
-    )
+    ),
+    roi_head=dict(
+        bbox_head=dict(
+            num_classes=20,
+        )
+    ),
 )
 
 img_norm_cfg = dict(mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
@@ -273,17 +278,17 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type="TextLoggerHook"),
-        dict(
-            type="WandbLoggerHook",
-            init_kwargs=dict(
-                project="pre_release",
-                name="${cfg_name}",
-                config=dict(
-                    work_dirs="${work_dir}",
-                    total_step="${runner.max_iters}",
-                ),
-            ),
-            by_epoch=False,
-        ),
+        # dict(
+        #     type="WandbLoggerHook",
+        #     init_kwargs=dict(
+        #         project="pre_release",
+        #         name="${cfg_name}",
+        #         config=dict(
+        #             work_dirs="${work_dir}",
+        #             total_step="${runner.max_iters}",
+        #         ),
+        #     ),
+        #     by_epoch=False,
+        # ),
     ],
 )

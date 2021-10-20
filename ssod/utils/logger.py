@@ -11,10 +11,7 @@ from mmcv.runner.dist_utils import get_dist_info
 from mmcv.utils import get_logger
 from mmdet.core.visualization import imshow_det_bboxes
 
-try:
-    import wandb
-except:
-    wandb = None
+wandb = None
 
 _log_counter = Counter()
 

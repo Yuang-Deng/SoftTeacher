@@ -107,17 +107,17 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type="TextLoggerHook"),
-        dict(
-            type="WandbLoggerHook",
-            init_kwargs=dict(
-                project="pre_release",
-                name="${cfg_name}",
-                config=dict(
-                    work_dirs="${work_dir}",
-                    total_step="${runner.max_iters}",
-                ),
-            ),
-            by_epoch=False,
-        ),
+        # dict(
+        #     type="WandbLoggerHook",
+        #     init_kwargs=dict(
+        #         project="pre_release",
+        #         name="${cfg_name}",
+        #         config=dict(
+        #             work_dirs="${work_dir}",
+        #             total_step="${runner.max_iters}",
+        #         ),
+        #     ),
+        #     by_epoch=False,
+        # ),
     ],
 )
