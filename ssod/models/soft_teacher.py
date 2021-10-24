@@ -221,8 +221,9 @@ class SoftTeacher(MultiSteamDetector):
             M,
             [meta["img_shape"] for meta in teacher_img_metas],
         )
-        # TODO soft teacher?
+        # TODO: soft teacher?
         with torch.no_grad():
+            # roi head 获取每个box的分数
             _, _scores = self.teacher.roi_head.simple_test_bboxes(
                 teacher_feat,
                 teacher_img_metas,
@@ -230,10 +231,14 @@ class SoftTeacher(MultiSteamDetector):
                 None,
                 rescale=False,
             )
+            # 取背景类的分数
             bg_score = torch.cat([_score[:, -1] for _score in _scores])
             assigned_label, _, _, _ = bbox_targets
             neg_inds = assigned_label == self.student.roi_head.bbox_head.num_classes
+            # 为判定为背景的bbox 置信度设为背景类分数
             bbox_targets[1][neg_inds] = bg_score[neg_inds].detach()
+        print('cls reweight w:-----------------------------------------------')
+        print(bbox_targets[1])
         loss = self.student.roi_head.bbox_head.loss(
             bbox_results["cls_score"],
             bbox_results["bbox_pred"],
@@ -393,6 +398,7 @@ class SoftTeacher(MultiSteamDetector):
             )
         )
         det_bboxes = proposal_list
+        # TODO: 计算box的不确定性
         reg_unc = self.compute_uncertainty_with_aug(
             feat, img_metas, proposal_list, proposal_label_list
         )

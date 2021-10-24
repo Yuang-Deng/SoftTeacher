@@ -17,7 +17,14 @@ model = dict(
     ),
     roi_head=dict(
         bbox_head=dict(
+            type='GMMShared2FCBBoxHead',
             num_classes=20,
+            gmm_k=4,
+            eta=12,
+            lam_box_loss=1,
+            cls_lambda=1,
+            student_warm_iter=3000,
+            teacher_warm_iter=40000,
         )
     ),
 )
@@ -265,8 +272,11 @@ custom_hooks = [
     dict(type="WeightSummary"),
     dict(type="MeanTeacher", momentum=0.999, interval=1, warm_up=0),
     dict(type="Weighter", steps=[-5000], vals=[4, 0], name="unsup_weight"),
+    dict(type='RoiEpochSetHook'),
+    dict(type='StudentRoiWarmEpochSetHook'),
+    dict(type='TeacherRoiWarmEpochSetHook'),
 ]
-evaluation = dict(type="SubModulesDistEvalHook", interval=4000)
+evaluation = dict(type="SubModulesDistEvalHook", interval=4000, metric='mAP')
 optimizer = dict(type="SGD", lr=0.00125, momentum=0.9, weight_decay=0.0001)
 lr_config = dict(step=[120000, 160000])
 runner = dict(_delete_=True, type="IterBasedRunner", max_iters=180000)
