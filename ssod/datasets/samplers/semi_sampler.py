@@ -14,7 +14,7 @@ class DistributedGroupSemiBalanceSampler(Sampler):
         self,
         dataset,
         by_prob=False,
-        epoch_length=7330,
+        epoch_length=700,
         sample_ratio=None,
         samples_per_gpu=1,
         num_replicas=None,

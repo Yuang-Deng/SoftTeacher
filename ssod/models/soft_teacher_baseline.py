@@ -53,7 +53,7 @@ class SoftTeacherBase(MultiSteamDetector):
             )
             unsup_loss = {"unsup_" + k: v for k, v in unsup_loss.items()}
             loss.update(**unsup_loss)
-
+        
         return loss
 
     def foward_unsup_train(self, teacher_data, student_data):

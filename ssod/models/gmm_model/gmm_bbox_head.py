@@ -10,6 +10,7 @@ from mmdet.core import build_bbox_coder, multi_apply, multiclass_nms
 from mmdet.models.builder import HEADS, build_loss
 from mmdet.models.losses import accuracy
 from mmdet.models.utils import build_linear_layer
+import math
 
 
 @HEADS.register_module()
@@ -391,6 +392,8 @@ class GMMBBoxHead(BaseModule):
                 if isinstance(loss_cls_, dict):
                     losses.update(loss_cls_)
                 else:
+                    if math.isinf(loss_cls_):
+                        loss_cls_ = 1e-2
                     losses['loss_cls'] = loss_cls_
                 if self.custom_activation:
                     acc_ = self.loss_cls.get_accuracy(cls_score, labels)
