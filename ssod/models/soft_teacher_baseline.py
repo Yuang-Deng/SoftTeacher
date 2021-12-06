@@ -15,7 +15,7 @@ from .utils import Transform2D, filter_invalid
 @DETECTORS.register_module()
 class SoftTeacherBase(MultiSteamDetector):
     def __init__(self, model: dict, train_cfg=None, test_cfg=None, memory_k=65536, ctr1_T=0.2, ctr2_T=0.2,
-     ctr1_lam_sup=1, ctr1_lam_unsup=1, ctr2_lam_sup=1, ctr2_lam_unsup=1):
+     ctr1_lam_sup=0.1, ctr1_lam_unsup=0.1, ctr2_lam_sup=0.1, ctr2_lam_unsup=0.1):
         super(SoftTeacherBase, self).__init__(
             dict(teacher=build_detector(model), student=build_detector(model)),
             train_cfg=train_cfg,
@@ -115,18 +115,27 @@ class SoftTeacherBase(MultiSteamDetector):
             for meta in anchor_data['img_metas']
         ]
 
+        ctr_box, ctr_labels, _ = multi_apply(
+            filter_invalid,
+            [bbox[:, :4] for bbox in ctr_info["det_bboxes"]],
+            ctr_info["det_labels"],
+            [bbox[:, 4] for bbox in ctr_info["det_bboxes"]],
+            thr=self.train_cfg.cls_pseudo_threshold,
+        )
+
         M = self._get_trans_mat(
             ctr_info["transform_matrix"], anchor_transform_matrix
         )
-        trans_bboxes = self._transform_bbox(
-            ctr_info["det_bboxes"],
+        anchor_box = self._transform_bbox(
+            ctr_box,
             M,
-            [meta["img_shape"] for meta in anchor_data["img_metas"]],
+            [meta["img_shape"] for meta in ctr_data["img_metas"]],
         )
-        anchor_data['gt_bboxes'] = trans_bboxes
-        anchor_data['gt_labels'] = ctr_info["det_labels"]
-        ctr_data['gt_bboxes'] = ctr_info["det_bboxes"]
-        ctr_data['gt_labels'] = ctr_info["det_labels"]
+
+        anchor_data['gt_bboxes'] = anchor_box
+        anchor_data['gt_labels'] = ctr_labels
+        ctr_data['gt_bboxes'] = ctr_box
+        ctr_data['gt_labels'] = ctr_labels
         ctr_losses = self.ctr_loss(anchor_data=anchor_data, dict_data=ctr_data)
         ctr_losses['ctr1'] = ctr_losses['ctr1'] * self.ctr1_lam_unsup
         ctr_losses['ctr2'] = ctr_losses['ctr2'] * self.ctr2_lam_unsup
