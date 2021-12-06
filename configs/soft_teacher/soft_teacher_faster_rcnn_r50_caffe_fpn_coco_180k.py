@@ -1,12 +1,11 @@
 _base_ = "base.py"
 
 data = dict(
-    samples_per_gpu=5,
+    samples_per_gpu=2,
     workers_per_gpu=0,
     train=dict(
         sup=dict(
             type="CocoDataset",
-            
             ann_file="/data/dya/dataset/coco/annotations/semi_supervised/instances_train2017.${fold}@${percent}.json",
             img_prefix="/data/dya/dataset/coco/train2017/",
         ),
@@ -22,7 +21,7 @@ data = dict(
     ),
     sampler=dict(
         train=dict(
-            sample_ratio=[1, 4],
+            sample_ratio=[1, 1],
         )
     ),
 )

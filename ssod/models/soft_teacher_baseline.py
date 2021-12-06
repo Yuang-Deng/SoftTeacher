@@ -304,8 +304,11 @@ class SoftTeacherBase(MultiSteamDetector):
         for gt_map in pos_gt_map_anchor:
             pos_inds = pos_gt_map_ctr == gt_map
             pos_proposal = dict_proposal[pos_inds]
+            if pos_proposal.size(0) == 0:
+                pos_inds = pos_gt_map_anchor == gt_map
+                pos_proposal = anchor_proposal[pos_inds]
             rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
-            ctr_proposal = torch.cat([ctr_proposal, dict_proposal[rand_index]], dim=0)
+            ctr_proposal = torch.cat([ctr_proposal, pos_proposal[rand_index]], dim=0)
 
         losses = dict()
         ctr1_loss = self.ctr_loss_1(anchor_info['backbone_feature'], anchor_proposal, dict_info['backbone_feature'], ctr_proposal)
@@ -319,12 +322,13 @@ class SoftTeacherBase(MultiSteamDetector):
 
     def ctr_loss_1(self, student_feat, student_proposal, teacher_feat, teacher_proposal):
         losses = dict()
+        device = student_feat[0].device
         student_proposal_rois = student_proposal
         student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
         teacher_proposal_rois = teacher_proposal
         teacher_proposals = self.teacher.roi_head.bbox_roi_extractor(teacher_feat[:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois)
         if student_proposals.size(0) == 0 or teacher_proposals.size(0) == 0:
-            losses['ctr1'] = 0
+            losses['ctr1'] = torch.zeros([1]).to(device)
             return losses 
         student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
         student_vec = F.normalize(student_vec, dim=1)
@@ -348,7 +352,7 @@ class SoftTeacherBase(MultiSteamDetector):
         student_proposal_rois = bbox2roi([stup for stup in pseudo_boxes])
         student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
         if student_proposals.size(0) == 0:
-            losses['ctr2'] = 0
+            losses['ctr2'] = torch.zeros([1]).to(device)
             return losses
         student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
         student_vec = F.normalize(student_vec, dim=1)
@@ -356,7 +360,9 @@ class SoftTeacherBase(MultiSteamDetector):
 
         teacher_vec = torch.zeros([0, self.projector_dim]).to(device)
         for label in all_labels:
-            same_label_item = self.labeled_dataset.get_same_label_item(label)[2]
+            same_label_item = self.labeled_dataset.get_same_label_item(label)
+            same_label_item = same_label_item[-1]
+            # same_label_item = same_label_item[-1] if isinstance(same_label_item, (list)) else same_label_item
             while label not in same_label_item['gt_labels'].data.to(device):
                 same_label_item = self.labeled_dataset.get_same_label_item(label)
             feat = self.teacher.extract_feat(same_label_item['img'].data.to(device)[None, :, :, :])

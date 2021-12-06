@@ -191,8 +191,46 @@ ctr_anchor_pipeline_sup = [
                 keep_ratio=True,
             ),
             dict(type="RandFlip", flip_ratio=0.5),
-            dict(type="MOCOTransform"),
-
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    # dict(
+                    #     type="OneOf",
+                    #     transforms=[
+                    #         dict(type="RandTranslate", x=(-0.1, 0.1)),
+                    #         dict(type="RandTranslate", y=(-0.1, 0.1)),
+                    #         dict(type="RandRotate", angle=(-30, 30)),
+                    #         [
+                    #             dict(type="RandShear", x=(-30, 30)),
+                    #             dict(type="RandShear", y=(-30, 30)),
+                    #         ],
+                    #     ],
+                    # ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
         ],
         record=True,
     ),
@@ -226,8 +264,46 @@ ctr_dict_pipeline_sup = [
                 keep_ratio=True,
             ),
             dict(type="RandFlip", flip_ratio=0.5),
-            dict(type="MOCOTransform"),
-
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    # dict(
+                    #     type="OneOf",
+                    #     transforms=[
+                    #         # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                    #         # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                    #         dict(type="RandRotate", angle=(-30, 30)),
+                    #         # [
+                    #         #     dict(type="RandShear", x=(-30, 30)),
+                    #         #     dict(type="RandShear", y=(-30, 30)),
+                    #         # ],
+                    #     ],
+                    # ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
         ],
         record=True,
     ),
@@ -261,8 +337,46 @@ ctr_anchor_pipeline_unsup = [
                 keep_ratio=True,
             ),
             dict(type="RandFlip", flip_ratio=0.5),
-            dict(type="MOCOTransform"),
-
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    # dict(
+                    #     type="OneOf",
+                    #     transforms=[
+                    #         # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                    #         # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                    #         dict(type="RandRotate", angle=(-30, 30)),
+                    #         # [
+                    #         #     dict(type="RandShear", x=(-30, 30)),
+                    #         #     dict(type="RandShear", y=(-30, 30)),
+                    #         # ],
+                    #     ],
+                    # ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
         ],
         record=True,
     ),
@@ -296,11 +410,50 @@ ctr_dict_pipeline_unsup = [
                 keep_ratio=True,
             ),
             dict(type="RandFlip", flip_ratio=0.5),
-            dict(type="MOCOTransform"),
-
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    # dict(
+                    #     type="OneOf",
+                    #     transforms=[
+                    #         # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                    #         # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                    #         dict(type="RandRotate", angle=(-30, 30)),
+                    #         # [
+                    #         #     dict(type="RandShear", x=(-30, 30)),
+                    #         #     dict(type="RandShear", y=(-30, 30)),
+                    #         # ],
+                    #     ],
+                    # ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
         ],
         record=True,
     ),
+    dict(type="MOCOTransform"),
     dict(type="Pad", size_divisor=32),
     dict(type="Normalize", **img_norm_cfg),
     dict(type="ExtraAttrs", tag="ctr_dict_unsup"),
