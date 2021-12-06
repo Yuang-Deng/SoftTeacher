@@ -48,6 +48,7 @@ class MeanTeacher(Hook):
         )
         runner.log_buffer.output["ema_momentum"] = momentum
         self.momentum_update(model, momentum)
+        model.labeled_dataset = runner.data_loader.iter_loader._dataset.datasets[0]
 
     def after_train_iter(self, runner):
         curr_step = runner.iter

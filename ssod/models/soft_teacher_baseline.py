@@ -1,7 +1,9 @@
 import torch
 from mmcv.runner.fp16_utils import force_fp32
 from mmdet.core import bbox2roi, multi_apply
-from mmdet.models import DETECTORS, build_detector
+from mmdet.models import DETECTORS, build_detector, losses
+import torch.nn.functional as F
+from torch.utils import data
 
 from ssod.utils.structure_utils import dict_split, weighted_loss
 from ssod.utils import log_image_with_boxes, log_every_n
@@ -12,7 +14,8 @@ from .utils import Transform2D, filter_invalid
 
 @DETECTORS.register_module()
 class SoftTeacherBase(MultiSteamDetector):
-    def __init__(self, model: dict, train_cfg=None, test_cfg=None):
+    def __init__(self, model: dict, train_cfg=None, test_cfg=None, memory_k=65536, ctr1_T=0.2, ctr2_T=0.2,
+     ctr1_lam_sup=1, ctr1_lam_unsup=1, ctr2_lam_sup=1, ctr2_lam_unsup=1):
         super(SoftTeacherBase, self).__init__(
             dict(teacher=build_detector(model), student=build_detector(model)),
             train_cfg=train_cfg,
@@ -21,6 +24,19 @@ class SoftTeacherBase(MultiSteamDetector):
         if train_cfg is not None:
             self.freeze("teacher")
             self.unsup_weight = self.train_cfg.unsup_weight
+        
+        self.memory_k = memory_k
+        self.ctr1_T = ctr1_T
+        self.ctr2_T = ctr2_T
+        self.ctr1_lam_sup = ctr1_lam_sup
+        self.ctr1_lam_unsup = ctr1_lam_unsup
+        self.ctr2_lam_sup = ctr2_lam_sup
+        self.ctr2_lam_unsup = ctr2_lam_unsup
+        self.projector_dim = model.projector_dim
+        self.register_buffer("queue_vector", torch.randn(memory_k, model.projector_dim)) 
+        self.queue_vector = F.normalize(self.queue_vector, dim=1)
+
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
     def forward_train(self, img, img_metas, **kwargs):
         super().forward_train(img, img_metas, **kwargs)
@@ -42,12 +58,19 @@ class SoftTeacherBase(MultiSteamDetector):
                 {"sup_gt_num": sum([len(bbox) for bbox in gt_bboxes]) / len(gt_bboxes)}
             )
             sup_loss = self.student.forward_train(**data_groups["sup"])
+            sup_ctr_loss = self.ctr_loss(data_groups["ctr_anchor_sup"], data_groups["ctr_dict_sup"])
+            sup_ctr_loss['ctr1'] = sup_ctr_loss['ctr1'] * self.ctr1_lam_sup
+            sup_ctr_loss['ctr2'] = sup_ctr_loss['ctr2'] * self.ctr2_lam_sup
             sup_loss = {"sup_" + k: v for k, v in sup_loss.items()}
+            sup_ctr_loss = {"sup_" + k: v for k, v in sup_ctr_loss.items()}
             loss.update(**sup_loss)
+            loss.update(**sup_ctr_loss)
+            
         if "unsup_student" in data_groups:
             unsup_loss = weighted_loss(
                 self.foward_unsup_train(
-                    data_groups["unsup_teacher"], data_groups["unsup_student"]
+                    data_groups["unsup_teacher"], data_groups["unsup_student"],
+                    data_groups["ctr_anchor_unsup"], data_groups["ctr_dict_unsup"]
                 ),
                 weight=self.unsup_weight,
             )
@@ -56,7 +79,7 @@ class SoftTeacherBase(MultiSteamDetector):
 
         return loss
 
-    def foward_unsup_train(self, teacher_data, student_data):
+    def foward_unsup_train(self, teacher_data, student_data, anchor_data, ctr_data):
         # sort the teacher and student input to avoid some bugs
         tnames = [meta["filename"] for meta in teacher_data["img_metas"]]
         snames = [meta["filename"] for meta in student_data["img_metas"]]
@@ -72,9 +95,44 @@ class SoftTeacherBase(MultiSteamDetector):
                 and (teacher_data["proposals"] is not None)
                 else None,
             )
+            ctr_info = self.extract_teacher_info(
+                ctr_data["img"][
+                    torch.Tensor(tidx).to(ctr_data["img"].device).long()
+                ],
+                [ctr_data["img_metas"][idx] for idx in tidx],
+                [ctr_data["proposals"][idx] for idx in tidx]
+                if ("proposals" in ctr_data)
+                and (ctr_data["proposals"] is not None)
+                else None,
+            )
         student_info = self.extract_student_info(**student_data)
 
-        return self.compute_pseudo_label_loss(student_info, teacher_info)
+        losses = dict()
+        losses.update(self.compute_pseudo_label_loss(student_info, teacher_info))
+
+        anchor_transform_matrix = [
+            torch.from_numpy(meta["transform_matrix"]).float().to(anchor_data['img'].device)
+            for meta in anchor_data['img_metas']
+        ]
+
+        M = self._get_trans_mat(
+            ctr_info["transform_matrix"], anchor_transform_matrix
+        )
+        trans_bboxes = self._transform_bbox(
+            ctr_info["det_bboxes"],
+            M,
+            [meta["img_shape"] for meta in anchor_data["img_metas"]],
+        )
+        anchor_data['gt_bboxes'] = trans_bboxes
+        anchor_data['gt_labels'] = ctr_info["det_labels"]
+        ctr_data['gt_bboxes'] = ctr_info["det_bboxes"]
+        ctr_data['gt_labels'] = ctr_info["det_labels"]
+        ctr_losses = self.ctr_loss(anchor_data=anchor_data, dict_data=ctr_data)
+        ctr_losses['ctr1'] = ctr_losses['ctr1'] * self.ctr1_lam_unsup
+        ctr_losses['ctr2'] = ctr_losses['ctr2'] * self.ctr2_lam_unsup
+        losses.update(**ctr_losses)
+
+        return losses
 
     def compute_pseudo_label_loss(self, student_info, teacher_info):
         M = self._get_trans_mat(
@@ -142,6 +200,185 @@ class SoftTeacherBase(MultiSteamDetector):
         )
         return loss
 
+    @torch.no_grad()
+    def concat_all_gather(self, features):
+        """
+        Performs all_gather operation on the provided tensors.
+        *** Warning ***: torch.distributed.all_gather has no gradient.
+        """
+        device = features.device
+        local_batch = torch.tensor(features.size(0)).to(device)
+        batch_size_gather = [torch.ones((1)).to(device)
+            for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather(batch_size_gather, local_batch.float(), async_op=False)
+        
+        batch_size_gather = [int(bs.item()) for bs in batch_size_gather]
+
+        max_batch = max(batch_size_gather)
+        size = (max_batch, features.size(1))
+        temp_features = torch.zeros(max_batch - local_batch, features.size(1)).to(device)
+        features = torch.cat([features, temp_features])
+
+        # size = (int(tensors_gather[0].item()), features.size(1))
+        # (int(tensors_gather[i].item()), features.size(1))
+        features_gather = [torch.ones(size).to(device)
+            for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather(features_gather, features, async_op=False)
+
+        features_gather = [f[:bs, :] for bs, f in zip(batch_size_gather, features_gather)]
+
+        features = torch.cat(features_gather, dim=0)
+
+        return features
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, features):
+        # gather keys before updating queue
+        
+        features = self.concat_all_gather(features)
+
+        batch_size = features.size(0)
+
+        ptr = int(self.queue_ptr)
+
+        # replace the keys at ptr (dequeue and enqueue)
+        if ptr + batch_size >= self.memory_k:
+            redundant = ptr + batch_size - self.memory_k
+            self.queue_vector[ptr:self.memory_k, :] = features.view(batch_size, -1)[:batch_size - redundant]
+            self.queue_vector[:redundant, :] = features.view(batch_size, -1)[batch_size - redundant:]
+        else:
+            self.queue_vector[ptr:ptr + batch_size, :] = features.view(batch_size, -1)
+        ptr = (ptr + batch_size) % self.memory_k  # move pointer
+
+        self.queue_ptr[0] = ptr
+
+    def ctr_loss(self, anchor_data, dict_data):
+        losses = {}
+        anchor_info, dict_info = self.extract_ctr_info(anchor_data, dict_data)
+
+        # for ctr 1
+        anchor_sample_res = anchor_info['sampling_results']
+        dict_sample_res = dict_info['sampling_results']
+
+        device = anchor_data['img'].device
+        batch = anchor_sample_res[0].bboxes.size(0)
+
+        pos_inds_anchor = torch.zeros([0]).to(device).long()
+        pos_gt_map_anchor = torch.zeros([0]).to(device).long()
+        pos_gt_map_ctr = torch.zeros([0]).to(device).long()
+        pos_labels_anchor = torch.zeros([0]).to(device).long()
+        pos_labels_ctr = torch.zeros([0]).to(device).long()
+        for i, (res_anchor, res_ctr) in enumerate(zip(anchor_sample_res, dict_sample_res)):
+            pos_inds_anchor = torch.cat([pos_inds_anchor, (torch.arange(0, res_anchor.pos_inds.size(0)).to(device).long() + (i * batch)).view(-1)])
+            pos_gt_map_anchor = torch.cat([pos_gt_map_anchor, (res_anchor.pos_assigned_gt_inds + (i * batch)).view(-1)])
+            pos_gt_map_ctr = torch.cat([pos_gt_map_ctr, (res_ctr.pos_assigned_gt_inds + (i * batch)).view(-1)])
+            pos_labels_anchor = torch.cat([pos_labels_anchor, res_anchor.pos_gt_labels])
+            pos_labels_ctr = torch.cat([pos_labels_ctr, res_ctr.pos_gt_labels])
+
+
+        # student_proposal_rois = bbox2roi([res.pos_bboxes for res in anchor_sample_res])
+        # student_proposals = self.student.roi_head.bbox_roi_extractor(anchor_info['backbone_feature'][:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
+        # teacher_proposal_rois = bbox2roi([res.pos_bboxes for res in dict_sample_res])
+        # teacher_proposals = self.teacher.roi_head.bbox_roi_extractor(dict_info['backbone_feature'][:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois)
+        # if student_proposals.size(0) == 0 or teacher_proposals.size(0) == 0:
+        #     losses['ctr1'] = 0
+        # else:
+        #     student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
+        #     student_vec = F.normalize(student_vec, dim=1)
+        #     teacher_vec = self.teacher.projector(teacher_proposals.view(teacher_proposals.size(0), -1))
+        #     teacher_vec = F.normalize(teacher_vec, dim=1)
+
+        #     ctr1_logit = torch.zeros(0, self.dim).to(device)
+        #     for i in range(pos_labels_anchor.size(0)):
+        #         pos_inds = pos_gt_map_ctr == pos_gt_map_anchor[i]
+        #         pos_logits = teacher_vec[pos_inds, :]
+        #         if pos_logits.size(0) == 0:
+        #             pos_inds = pos_gt_map_anchor == pos_gt_map_anchor[i]
+        #             pos_logits = student_vec[pos_inds, :]
+        #         rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
+        #         ctr1_logit = torch.cat([ctr1_logit, pos_logits])
+
+        anchor_proposal = bbox2roi([res.pos_bboxes for res in anchor_sample_res])
+        dict_proposal = bbox2roi([res.pos_bboxes for res in dict_sample_res])
+        ctr_proposal = torch.zeros([0, 5]).to(device)
+        for gt_map in pos_gt_map_anchor:
+            pos_inds = pos_gt_map_ctr == gt_map
+            pos_proposal = dict_proposal[pos_inds]
+            rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
+            ctr_proposal = torch.cat([ctr_proposal, dict_proposal[rand_index]], dim=0)
+
+        losses = dict()
+        ctr1_loss = self.ctr_loss_1(anchor_info['backbone_feature'], anchor_proposal, dict_info['backbone_feature'], ctr_proposal)
+        losses.update(**ctr1_loss)
+        ctr2_loss = self.ctr_loss_2(anchor_info['backbone_feature'], anchor_data['gt_bboxes'], anchor_data['gt_labels'])
+        losses.update(**ctr2_loss)
+        return losses
+        
+
+        
+
+    def ctr_loss_1(self, student_feat, student_proposal, teacher_feat, teacher_proposal):
+        losses = dict()
+        student_proposal_rois = student_proposal
+        student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
+        teacher_proposal_rois = teacher_proposal
+        teacher_proposals = self.teacher.roi_head.bbox_roi_extractor(teacher_feat[:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois)
+        if student_proposals.size(0) == 0 or teacher_proposals.size(0) == 0:
+            losses['ctr1'] = 0
+            return losses 
+        student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
+        student_vec = F.normalize(student_vec, dim=1)
+        teacher_vec = self.teacher.projector(teacher_proposals.view(teacher_proposals.size(0), -1))
+        teacher_vec = F.normalize(teacher_vec, dim=1)
+
+        neg_logits = torch.einsum('nc,kc->nk', [student_vec, self.queue_vector.clone().detach()])
+        pos_logits = torch.einsum('nc,nc->n', [student_vec, teacher_vec])
+        logits = torch.cat([pos_logits[:, None], neg_logits], dim=1)
+        logits /= self.ctr1_T
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        losses['ctr1'] = F.cross_entropy(logits, labels)
+
+        self._dequeue_and_enqueue(teacher_vec)
+
+        return losses
+
+    def ctr_loss_2(self, student_feat, pseudo_boxes, pseudo_labels):
+        losses = dict()
+        device = student_feat[0].device
+        student_proposal_rois = bbox2roi([stup for stup in pseudo_boxes])
+        student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
+        if student_proposals.size(0) == 0:
+            losses['ctr2'] = 0
+            return losses
+        student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
+        student_vec = F.normalize(student_vec, dim=1)
+        all_labels = torch.cat(pseudo_labels)
+
+        teacher_vec = torch.zeros([0, self.projector_dim]).to(device)
+        for label in all_labels:
+            same_label_item = self.labeled_dataset.get_same_label_item(label)[2]
+            while label not in same_label_item['gt_labels'].data.to(device):
+                same_label_item = self.labeled_dataset.get_same_label_item(label)
+            feat = self.teacher.extract_feat(same_label_item['img'].data.to(device)[None, :, :, :])
+            teacher_proposal_rois = bbox2roi([same_label_item['gt_bboxes'].data[same_label_item['gt_labels'].data.to(device) == label].to(device)])
+            rand_index = torch.randint(low=0, high=teacher_proposal_rois.size(0), size=(1,))
+            teacher_proposal = self.teacher.roi_head.bbox_roi_extractor(feat[:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois[rand_index])
+            vec = self.teacher.projector(teacher_proposal.view(teacher_proposal.size(0), -1))
+            teacher_vec = torch.cat([teacher_vec, vec], dim=0)
+        teacher_vec = F.normalize(teacher_vec, dim=1)
+        
+        neg_logits = torch.einsum('nc,kc->nk', [student_vec, self.queue_vector.clone().detach()])
+        pos_logits = torch.einsum('nc,nc->n', [student_vec, teacher_vec])
+        logits = torch.cat([pos_logits[:, None], neg_logits], dim=1)
+        logits /= self.ctr2_T
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        losses = dict()
+        losses['ctr2'] = F.cross_entropy(logits, labels)
+
+        # self._dequeue_and_enqueue(teacher_vec)
+
+        return losses
+
     def rpn_loss(
         self,
         rpn_out,
@@ -174,7 +411,7 @@ class SoftTeacherBase(MultiSteamDetector):
                 "rpn_proposal", self.student.test_cfg.rpn
             )
             proposal_list = self.student.rpn_head.get_bboxes(
-                *rpn_out, img_metas, cfg=proposal_cfg
+                *rpn_out, img_metas=img_metas, cfg=proposal_cfg
             )
             log_image_with_boxes(
                 "rpn",
@@ -347,23 +584,37 @@ class SoftTeacherBase(MultiSteamDetector):
         gt_bboxes,
         gt_labels,
         gt_bboxes_ignore=None,
+        mode='student',
         **kwargs,
     ):
         num_imgs = len(img_metas)
         if gt_bboxes_ignore is None:
             gt_bboxes_ignore = [None for _ in range(num_imgs)]
         sampling_results = []
-        for i in range(num_imgs):
-            assign_result = self.student.roi_head.bbox_assigner.assign(
-                proposal_list[i], gt_bboxes[i], gt_bboxes_ignore[i], gt_labels[i]
-            )
-            sampling_result = self.student.roi_head.bbox_sampler.sample(
-                assign_result,
-                proposal_list[i],
-                gt_bboxes[i],
-                gt_labels[i],
-            )
-            sampling_results.append(sampling_result)
+        if mode == 'student':
+            for i in range(num_imgs):
+                assign_result = self.student.roi_head.bbox_assigner.assign(
+                    proposal_list[i], gt_bboxes[i], gt_bboxes_ignore[i], gt_labels[i]
+                )
+                sampling_result = self.student.roi_head.bbox_sampler.sample(
+                    assign_result,
+                    proposal_list[i],
+                    gt_bboxes[i],
+                    gt_labels[i],
+                )
+                sampling_results.append(sampling_result)
+        else:
+            for i in range(num_imgs):
+                assign_result = self.teacher.roi_head.bbox_assigner.assign(
+                    proposal_list[i], gt_bboxes[i], gt_bboxes_ignore[i], gt_labels[i]
+                )
+                sampling_result = self.teacher.roi_head.bbox_sampler.sample(
+                    assign_result,
+                    proposal_list[i],
+                    gt_bboxes[i],
+                    gt_labels[i],
+                )
+                sampling_results.append(sampling_result)
         return sampling_results
 
     @force_fp32(apply_to=["bboxes", "trans_mat"])
@@ -374,6 +625,68 @@ class SoftTeacherBase(MultiSteamDetector):
     @force_fp32(apply_to=["a", "b"])
     def _get_trans_mat(self, a, b):
         return [bt @ at.inverse() for bt, at in zip(b, a)]
+
+    def extract_ctr_info(self, strong_data, weak_data):
+        strong_info = {}
+        strong_info["img"] = strong_data['img']
+        feat = self.student.extract_feat(strong_data['img'])
+        strong_info["backbone_feature"] = feat
+        if self.student.with_rpn:
+            rpn_out = self.student.rpn_head(feat)
+            strong_info["rpn_out"] = list(rpn_out)
+        strong_info["img_metas"] = strong_data['img_metas']
+        # strong_info["proposals"] = strong_data['proposals']
+        strong_info["transform_matrix"] = [
+            torch.from_numpy(meta["transform_matrix"]).float().to(feat[0][0].device)
+            for meta in strong_data['img_metas']
+        ]
+        proposal_cfg = self.student.train_cfg.get(
+                "rpn_proposal", self.student.test_cfg.rpn
+            )
+        proposal_list = self.student.rpn_head.get_bboxes(
+                *rpn_out, img_metas=strong_data['img_metas'], cfg=proposal_cfg
+            )
+
+        strong_info['sampling_results'] = self.get_sampling_result(
+            strong_data['img_metas'],
+            proposal_list,
+            strong_data['gt_bboxes'],
+            strong_data['gt_labels'],
+            mode='student'
+        )
+        strong_info["proposals"] = proposal_list
+
+        weak_info = {}
+        weak_info["img"] = weak_data['img']
+        feat = self.teacher.extract_feat(weak_data['img'])
+        weak_info["backbone_feature"] = feat
+        if self.teacher.with_rpn:
+            rpn_out = self.teacher.rpn_head(feat)
+            weak_info["rpn_out"] = list(rpn_out)
+        weak_info["img_metas"] = weak_data['img_metas']
+        # weak_info["proposals"] = weak_data['proposals']
+        weak_info["transform_matrix"] = [
+            torch.from_numpy(meta["transform_matrix"]).float().to(feat[0][0].device)
+            for meta in weak_data['img_metas']
+        ]
+
+        proposal_cfg = self.teacher.train_cfg.get(
+                "rpn_proposal", self.teacher.test_cfg.rpn
+            )
+        proposal_list = self.teacher.rpn_head.get_bboxes(
+                *rpn_out, img_metas=weak_data['img_metas'], cfg=proposal_cfg
+            )
+
+        weak_info['sampling_results'] = self.get_sampling_result(
+            weak_data['img_metas'],
+            proposal_list,
+            weak_data['gt_bboxes'],
+            weak_data['gt_labels'],
+            mode='teacher'
+        )
+        weak_info["proposals"] = proposal_list
+
+        return strong_info, weak_info
 
     def extract_student_info(self, img, img_metas, proposals=None, **kwargs):
         student_info = {}
@@ -401,7 +714,7 @@ class SoftTeacherBase(MultiSteamDetector):
             )
             rpn_out = list(self.teacher.rpn_head(feat))
             proposal_list = self.teacher.rpn_head.get_bboxes(
-                *rpn_out, img_metas, cfg=proposal_cfg
+                *rpn_out, img_metas=img_metas, cfg=proposal_cfg
             )
         else:
             proposal_list = proposals
@@ -419,6 +732,8 @@ class SoftTeacherBase(MultiSteamDetector):
         # filter invalid box roughly
         if isinstance(self.train_cfg.pseudo_label_initial_score_thr, float):
             thr = self.train_cfg.pseudo_label_initial_score_thr
+        if isinstance(self.train_cfg.contrastive_initial_score_thr, float):
+            contrastive_thr = self.train_cfg.contrastive_initial_score_thr
         else:
             # TODO: use dynamic threshold
             raise NotImplementedError("Dynamic Threshold is not implemented yet.")

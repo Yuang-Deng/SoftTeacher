@@ -7,6 +7,8 @@ _base_ = [
 ]
 
 model = dict(
+    type='MMFasterRCNN',
+    projector_dim = 128,
     backbone=dict(
         norm_cfg=dict(requires_grad=False),
         norm_eval=True,
@@ -20,8 +22,8 @@ model = dict(
 img_norm_cfg = dict(mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
 
 train_pipeline = [
-    dict(type="LoadImageFromFile"),
-    dict(type="LoadAnnotations", with_bbox=True),
+    # dict(type="LoadImageFromFile"),
+    # dict(type="LoadAnnotations", with_bbox=True),
     dict(
         type="Sequential",
         transforms=[
@@ -177,13 +179,314 @@ weak_pipeline = [
         ),
     ),
 ]
+
+ctr_anchor_pipeline_sup = [
+    dict(
+        type="Sequential",
+        transforms=[
+            dict(
+                type="RandResize",
+                img_scale=[(1333, 400), (1333, 1200)],
+                multiscale_mode="range",
+                keep_ratio=True,
+            ),
+            dict(type="RandFlip", flip_ratio=0.5),
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                            # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                            dict(type="RandRotate", angle=(-30, 30)),
+                            # [
+                            #     dict(type="RandShear", x=(-30, 30)),
+                            #     dict(type="RandShear", y=(-30, 30)),
+                            # ],
+                        ],
+                    ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
+        ],
+        record=True,
+    ),
+    dict(type="Pad", size_divisor=32),
+    dict(type="Normalize", **img_norm_cfg),
+    dict(type="ExtraAttrs", tag="ctr_anchor_sup"),
+    dict(type="DefaultFormatBundle"),
+    dict(
+        type="Collect",
+        keys=["img", "gt_bboxes", "gt_labels"],
+        meta_keys=(
+            "filename",
+            "ori_shape",
+            "img_shape",
+            "img_norm_cfg",
+            "pad_shape",
+            "scale_factor",
+            "tag",
+            "transform_matrix",
+        ),
+    ),
+]
+ctr_dict_pipeline_sup = [
+    dict(
+        type="Sequential",
+        transforms=[
+            dict(
+                type="RandResize",
+                img_scale=[(1333, 400), (1333, 1200)],
+                multiscale_mode="range",
+                keep_ratio=True,
+            ),
+            dict(type="RandFlip", flip_ratio=0.5),
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                            # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                            dict(type="RandRotate", angle=(-30, 30)),
+                            # [
+                            #     dict(type="RandShear", x=(-30, 30)),
+                            #     dict(type="RandShear", y=(-30, 30)),
+                            # ],
+                        ],
+                    ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
+        ],
+        record=True,
+    ),
+    dict(type="Pad", size_divisor=32),
+    dict(type="Normalize", **img_norm_cfg),
+    dict(type="ExtraAttrs", tag="ctr_dict_sup"),
+    dict(type="DefaultFormatBundle"),
+    dict(
+        type="Collect",
+        keys=["img", "gt_bboxes", "gt_labels"],
+        meta_keys=(
+            "filename",
+            "ori_shape",
+            "img_shape",
+            "img_norm_cfg",
+            "pad_shape",
+            "scale_factor",
+            "tag",
+            "transform_matrix",
+        ),
+    ),
+]
+ctr_anchor_pipeline_unsup = [
+    dict(
+        type="Sequential",
+        transforms=[
+            dict(
+                type="RandResize",
+                img_scale=[(1333, 400), (1333, 1200)],
+                multiscale_mode="range",
+                keep_ratio=True,
+            ),
+            dict(type="RandFlip", flip_ratio=0.5),
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                            # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                            dict(type="RandRotate", angle=(-30, 30)),
+                            # [
+                            #     dict(type="RandShear", x=(-30, 30)),
+                            #     dict(type="RandShear", y=(-30, 30)),
+                            # ],
+                        ],
+                    ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
+        ],
+        record=True,
+    ),
+    dict(type="Pad", size_divisor=32),
+    dict(type="Normalize", **img_norm_cfg),
+    dict(type="ExtraAttrs", tag="ctr_anchor_unsup"),
+    dict(type="DefaultFormatBundle"),
+    dict(
+        type="Collect",
+        keys=["img", "gt_bboxes", "gt_labels"],
+        meta_keys=(
+            "filename",
+            "ori_shape",
+            "img_shape",
+            "img_norm_cfg",
+            "pad_shape",
+            "scale_factor",
+            "tag",
+            "transform_matrix",
+        ),
+    ),
+]
+ctr_dict_pipeline_unsup = [
+    dict(
+        type="Sequential",
+        transforms=[
+            dict(
+                type="RandResize",
+                img_scale=[(1333, 400), (1333, 1200)],
+                multiscale_mode="range",
+                keep_ratio=True,
+            ),
+            dict(type="RandFlip", flip_ratio=0.5),
+            dict(
+                type="ShuffledSequential",
+                transforms=[
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            dict(type=k)
+                            for k in [
+                                "Identity",
+                                "AutoContrast",
+                                "RandEqualize",
+                                "RandSolarize",
+                                "RandColor",
+                                "RandContrast",
+                                "RandBrightness",
+                                "RandSharpness",
+                                "RandPosterize",
+                            ]
+                        ],
+                    ),
+                    dict(
+                        type="OneOf",
+                        transforms=[
+                            # dict(type="RandTranslate", x=(-0.1, 0.1)),
+                            # dict(type="RandTranslate", y=(-0.1, 0.1)),
+                            dict(type="RandRotate", angle=(-30, 30)),
+                            # [
+                            #     dict(type="RandShear", x=(-30, 30)),
+                            #     dict(type="RandShear", y=(-30, 30)),
+                            # ],
+                        ],
+                    ),
+                ],
+            ),
+            # dict(
+            #     type="RandErase",
+            #     n_iterations=(1, 5),
+            #     size=[0, 0.2],
+            #     squared=True,
+            # ),
+        ],
+        record=True,
+    ),
+    dict(type="Pad", size_divisor=32),
+    dict(type="Normalize", **img_norm_cfg),
+    dict(type="ExtraAttrs", tag="ctr_dict_unsup"),
+    dict(type="DefaultFormatBundle"),
+    dict(
+        type="Collect",
+        keys=["img", "gt_bboxes", "gt_labels"],
+        meta_keys=(
+            "filename",
+            "ori_shape",
+            "img_shape",
+            "img_norm_cfg",
+            "pad_shape",
+            "scale_factor",
+            "tag",
+            "transform_matrix",
+        ),
+    ),
+]
+
 unsup_pipeline = [
     dict(type="LoadImageFromFile"),
     # dict(type="LoadAnnotations", with_bbox=True),
     # generate fake labels for data format compability
     dict(type="PseudoSamples", with_bbox=True),
     dict(
-        type="MultiBranch", unsup_teacher=strong_pipeline, unsup_student=weak_pipeline
+        type="MultiBranch", unsup_student=strong_pipeline, unsup_teacher=weak_pipeline, anchor=ctr_anchor_pipeline_unsup, dict=ctr_dict_pipeline_unsup
+    ),
+]
+sup_pipeline = [
+    dict(type="LoadImageFromFile"),
+    dict(type="LoadAnnotations", with_bbox=True),
+    dict(
+        type="MultiBranch", train=train_pipeline, anchor=ctr_anchor_pipeline_sup, dict=ctr_dict_pipeline_sup
     ),
 ]
 
@@ -203,7 +506,6 @@ test_pipeline = [
         ],
     ),
 ]
-data_root = 'C:/Users/Alex/WorkSpace/dataset/coco/'
 data = dict(
     samples_per_gpu=None,
     workers_per_gpu=None,
@@ -214,7 +516,7 @@ data = dict(
             type="CocoDataset",
             ann_file=None,
             img_prefix=None,
-            pipeline=train_pipeline,
+            pipeline=sup_pipeline,
         ),
         unsup=dict(
             type="CocoDataset",
@@ -236,16 +538,19 @@ data = dict(
         )
     ),
 )
+    
 
 semi_wrapper = dict(
     type="SoftTeacherBase",
     model="${model}",
+    memory_k = 65536,
     train_cfg=dict(
         use_teacher_proposal=False,
         pseudo_label_initial_score_thr=0.5,
+        contrastive_initial_score_thr=0.5,
         rpn_pseudo_threshold=0.9,
         cls_pseudo_threshold=0.9,
-        reg_pseudo_threshold=0.01,
+        reg_pseudo_threshold=0.02,
         jitter_times=10,
         jitter_scale=0.06,
         min_pseduo_box_size=0,
@@ -272,17 +577,17 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type="TextLoggerHook"),
-        dict(
-            type="WandbLoggerHook",
-            init_kwargs=dict(
-                project="pre_release",
-                name="${cfg_name}",
-                config=dict(
-                    work_dirs="${work_dir}",
-                    total_step="${runner.max_iters}",
-                ),
-            ),
-            by_epoch=False,
-        ),
+        # dict(
+        #     type="WandbLoggerHook",
+        #     init_kwargs=dict(
+        #         project="pre_release",
+        #         name="${cfg_name}",
+        #         config=dict(
+        #             work_dirs="${work_dir}",
+        #             total_step="${runner.max_iters}",
+        #         ),
+        #     ),
+        #     by_epoch=False,
+        # ),
     ],
 )
