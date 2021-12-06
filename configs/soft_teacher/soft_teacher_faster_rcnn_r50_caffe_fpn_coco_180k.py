@@ -6,6 +6,7 @@ data = dict(
     train=dict(
         sup=dict(
             type="CocoDataset",
+            
             ann_file="/data/dya/dataset/coco/annotations/semi_supervised/instances_train2017.${fold}@${percent}.json",
             img_prefix="/data/dya/dataset/coco/train2017/",
         ),
