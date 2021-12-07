@@ -15,7 +15,7 @@ from .utils import Transform2D, filter_invalid
 @DETECTORS.register_module()
 class SoftTeacherBase(MultiSteamDetector):
     def __init__(self, model: dict, train_cfg=None, test_cfg=None, memory_k=65536, ctr1_T=0.2, ctr2_T=0.2,
-     ctr1_lam_sup=0.1, ctr1_lam_unsup=0.1, ctr2_lam_sup=0.1, ctr2_lam_unsup=0.1):
+     ctr1_lam_sup=0.1, ctr1_lam_unsup=0.1, ctr2_lam_sup=0.1, ctr2_lam_unsup=0.1, ctr2_num=2):
         super(SoftTeacherBase, self).__init__(
             dict(teacher=build_detector(model), student=build_detector(model)),
             train_cfg=train_cfg,
@@ -33,6 +33,7 @@ class SoftTeacherBase(MultiSteamDetector):
         self.ctr2_lam_sup = ctr2_lam_sup
         self.ctr2_lam_unsup = ctr2_lam_unsup
         self.projector_dim = model.projector_dim
+        self.ctr2_num = ctr2_num
         self.register_buffer("queue_vector", torch.randn(memory_k, model.projector_dim)) 
         self.queue_vector = F.normalize(self.queue_vector, dim=1)
 
@@ -267,13 +268,31 @@ class SoftTeacherBase(MultiSteamDetector):
 
     def ctr_loss(self, anchor_data, dict_data):
         losses = {}
+        device = anchor_data['img'].device
         anchor_info, dict_info = self.extract_ctr_info(anchor_data, dict_data)
+
+        gt_num = 0
+        for labels in anchor_data['gt_labels']:
+            gt_num += labels.size(0)
+        
+        if gt_num == 0:
+            losses['ctr1'] = torch.zeros([1]).to(device)
+            losses['ctr2'] = torch.zeros([1]).to(device)
+            return losses
+        
+        for i in range(len(anchor_data['gt_bboxes'])):
+            if anchor_data['gt_bboxes'][i].size(0) > self.ctr2_num:
+                rand_ind = torch.randint(low=0, high=anchor_data['gt_bboxes'][i].size(0), size=(self.ctr2_num,))
+                anchor_data['gt_bboxes'][i] = anchor_data['gt_bboxes'][i][rand_ind]
+                anchor_data['gt_labels'][i] = anchor_data['gt_labels'][i][rand_ind]
+                dict_data['gt_bboxes'][i] = dict_data['gt_bboxes'][i][rand_ind]
+                dict_data['gt_labels'][i] = dict_data['gt_labels'][i][rand_ind]
+
 
         # for ctr 1
         anchor_sample_res = anchor_info['sampling_results']
         dict_sample_res = dict_info['sampling_results']
 
-        device = anchor_data['img'].device
         batch = anchor_sample_res[0].bboxes.size(0)
 
         pos_inds_anchor = torch.zeros([0]).to(device).long()
@@ -317,9 +336,9 @@ class SoftTeacherBase(MultiSteamDetector):
         for gt_map in pos_gt_map_anchor:
             pos_inds = pos_gt_map_ctr == gt_map
             pos_proposal = dict_proposal[pos_inds]
-            if pos_proposal.size(0) == 0:
-                pos_inds = pos_gt_map_anchor == gt_map
-                pos_proposal = anchor_proposal[pos_inds]
+            # if pos_proposal.size(0) == 0:
+            #     pos_inds = pos_gt_map_anchor == gt_map
+            #     pos_proposal = anchor_proposal[pos_inds]
             rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
             ctr_proposal = torch.cat([ctr_proposal, pos_proposal[rand_index]], dim=0)
 
