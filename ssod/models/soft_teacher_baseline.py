@@ -84,6 +84,10 @@ class SoftTeacherBase(MultiSteamDetector):
         tnames = [meta["filename"] for meta in teacher_data["img_metas"]]
         snames = [meta["filename"] for meta in student_data["img_metas"]]
         tidx = [tnames.index(name) for name in snames]
+
+        anchornames = [meta["filename"] for meta in anchor_data["img_metas"]]
+        ctrnames = [meta["filename"] for meta in ctr_data["img_metas"]]
+        ctridx = [anchornames.index(name) for name in ctrnames]
         with torch.no_grad():
             teacher_info = self.extract_teacher_info(
                 teacher_data["img"][
@@ -97,10 +101,10 @@ class SoftTeacherBase(MultiSteamDetector):
             )
             ctr_info = self.extract_teacher_info(
                 ctr_data["img"][
-                    torch.Tensor(tidx).to(ctr_data["img"].device).long()
+                    torch.Tensor(ctridx).to(ctr_data["img"].device).long()
                 ],
-                [ctr_data["img_metas"][idx] for idx in tidx],
-                [ctr_data["proposals"][idx] for idx in tidx]
+                [ctr_data["img_metas"][idx] for idx in ctridx],
+                [ctr_data["proposals"][idx] for idx in ctridx]
                 if ("proposals" in ctr_data)
                 and (ctr_data["proposals"] is not None)
                 else None,
