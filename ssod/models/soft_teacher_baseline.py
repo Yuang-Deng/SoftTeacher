@@ -1,7 +1,9 @@
+from numpy import true_divide
 import torch
 from mmcv.runner.fp16_utils import force_fp32
 from mmdet.core import bbox2roi, multi_apply
 from mmdet.models import DETECTORS, build_detector, losses
+from torch._C import device
 import torch.nn.functional as F
 from torch.utils import data
 
@@ -60,8 +62,8 @@ class SoftTeacherBase(MultiSteamDetector):
             )
             sup_loss = self.student.forward_train(**data_groups["sup"])
             sup_ctr_loss = self.ctr_loss(data_groups["ctr_anchor_sup"], data_groups["ctr_dict_sup"])
-            sup_ctr_loss['ctr1'] = sup_ctr_loss['ctr1'] * self.ctr1_lam_sup
-            sup_ctr_loss['ctr2'] = sup_ctr_loss['ctr2'] * self.ctr2_lam_sup
+            sup_ctr_loss['ctr1_loss'] = sup_ctr_loss['ctr1_loss'] * self.ctr1_lam_sup
+            sup_ctr_loss['ctr2_loss'] = sup_ctr_loss['ctr2_loss'] * self.ctr2_lam_sup
             sup_loss = {"sup_" + k: v for k, v in sup_loss.items()}
             sup_ctr_loss = {"sup_" + k: v for k, v in sup_ctr_loss.items()}
             loss.update(**sup_loss)
@@ -75,6 +77,10 @@ class SoftTeacherBase(MultiSteamDetector):
                 ),
                 weight=self.unsup_weight,
             )
+            device = img.device
+            if 'loss_cls' not in unsup_loss.keys() or 'acc' not in unsup_loss.keys():
+                unsup_loss['loss_cls'] = torch.zeros([1]).to(device)
+                unsup_loss['acc'] = torch.zeros([1]).to(device)
             unsup_loss = {"unsup_" + k: v for k, v in unsup_loss.items()}
             loss.update(**unsup_loss)
 
@@ -128,6 +134,11 @@ class SoftTeacherBase(MultiSteamDetector):
             thr=self.train_cfg.cls_pseudo_threshold,
         )
 
+        anchor_label = [ctr_l.clone().detach() for ctr_l in ctr_labels]
+
+
+        # ctr_box[0] = torch.tensor([[10,10,30,30]]).to(anchor_data['img'].device)
+        # ctr_labels[0] = torch.tensor([0]).to(anchor_data['img'].device)
         M = self._get_trans_mat(
             ctr_info["transform_matrix"], anchor_transform_matrix
         )
@@ -138,12 +149,12 @@ class SoftTeacherBase(MultiSteamDetector):
         )
 
         anchor_data['gt_bboxes'] = anchor_box
-        anchor_data['gt_labels'] = ctr_labels
+        anchor_data['gt_labels'] = anchor_label
         ctr_data['gt_bboxes'] = ctr_box
         ctr_data['gt_labels'] = ctr_labels
         ctr_losses = self.ctr_loss(anchor_data=anchor_data, dict_data=ctr_data)
-        ctr_losses['ctr1'] = ctr_losses['ctr1'] * self.ctr1_lam_unsup
-        ctr_losses['ctr2'] = ctr_losses['ctr2'] * self.ctr2_lam_unsup
+        ctr_losses['ctr1_loss'] = ctr_losses['ctr1_loss'] * self.ctr1_lam_unsup
+        ctr_losses['ctr2_loss'] = ctr_losses['ctr2_loss'] * self.ctr2_lam_unsup
         losses.update(**ctr_losses)
 
         return losses
@@ -202,8 +213,7 @@ class SoftTeacherBase(MultiSteamDetector):
         #         student_info=student_info,
         #     )
         # )
-        loss.update(
-            self.unsup_rcnn_loss(
+        rcnn_loss = self.unsup_rcnn_loss(
                 student_info["backbone_feature"],
                 student_info["img_metas"],
                 proposals,
@@ -211,7 +221,7 @@ class SoftTeacherBase(MultiSteamDetector):
                 pseudo_labels,
                 student_info=student_info,
             )
-        )
+        loss.update(**rcnn_loss)
         return loss
 
     @torch.no_grad()
@@ -253,6 +263,9 @@ class SoftTeacherBase(MultiSteamDetector):
 
         batch_size = features.size(0)
 
+        if batch_size == 0:
+            return
+
         ptr = int(self.queue_ptr)
 
         # replace the keys at ptr (dequeue and enqueue)
@@ -269,19 +282,60 @@ class SoftTeacherBase(MultiSteamDetector):
     def ctr_loss(self, anchor_data, dict_data):
         losses = {}
         device = anchor_data['img'].device
+
+        valid_inds = []
+        for ind in range(len(anchor_data['gt_labels'])):
+            assert anchor_data['gt_labels'][ind].size(0) == dict_data['gt_labels'][ind].size(0) == anchor_data['gt_bboxes'][ind].size(0) == dict_data['gt_bboxes'][ind].size(0)
+            if anchor_data['gt_labels'][ind].size(0) == 0:
+                for k in anchor_data.keys():
+                    if isinstance(anchor_data[k], (list)):
+                        anchor_data[k].pop(ind)
+                        dict_data[k].pop(ind)
+            else:
+                valid_inds.append(ind)
+
+        if len(valid_inds) == 0:
+            losses['ctr1_loss'] = torch.zeros([1]).to(device)
+            losses['ctr2_loss'] = torch.zeros([1]).to(device)
+            self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
+            return losses
+        
+        anchor_data['img'] = anchor_data['img'][valid_inds]
+        dict_data['img'] = dict_data['img'][valid_inds]
+        assert anchor_data['img'].size(0) == dict_data['img'].size(0)
         anchor_info, dict_info = self.extract_ctr_info(anchor_data, dict_data)
+
+        ctr1_loss = self.ctr_loss_1(anchor_info, dict_info)
+        losses.update(**ctr1_loss)
+        ctr2_loss = self.ctr_loss_2(anchor_info['backbone_feature'], anchor_data['gt_bboxes'], anchor_data['gt_labels'])
+        losses.update(**ctr2_loss)
+        return losses
+
+        
+        losses['ctr1_loss'] = torch.zeros([1]).to(device)
+        losses['ctr2_loss'] = torch.zeros([1]).to(device)
+        self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
+        return losses
+
 
         gt_num = 0
         for labels in anchor_data['gt_labels']:
             gt_num += labels.size(0)
         
         if gt_num == 0:
-            losses['ctr1'] = torch.zeros([1]).to(device)
-            losses['ctr2'] = torch.zeros([1]).to(device)
+            losses['ctr1_loss'] = torch.zeros([1]).to(device)
+            losses['ctr2_loss'] = torch.zeros([1]).to(device)
+            self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
             return losses
         
         for i in range(len(anchor_data['gt_bboxes'])):
             if anchor_data['gt_bboxes'][i].size(0) > self.ctr2_num:
+                if anchor_data['gt_bboxes'][i].size(0) != dict_data['gt_bboxes'][i].size(0):
+                    losses['ctr1_loss'] = torch.zeros([1]).to(device)
+                    ctr2_loss = self.ctr_loss_2(anchor_info['backbone_feature'], anchor_data['gt_bboxes'], anchor_data['gt_labels'])
+                    losses.update(**ctr2_loss)
+                    self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
+                    return losses
                 rand_ind = torch.randint(low=0, high=anchor_data['gt_bboxes'][i].size(0), size=(self.ctr2_num,))
                 anchor_data['gt_bboxes'][i] = anchor_data['gt_bboxes'][i][rand_ind]
                 anchor_data['gt_labels'][i] = anchor_data['gt_labels'][i][rand_ind]
@@ -293,74 +347,124 @@ class SoftTeacherBase(MultiSteamDetector):
         anchor_sample_res = anchor_info['sampling_results']
         dict_sample_res = dict_info['sampling_results']
 
+        if not self.valid_sample_res(anchor_sample_res) or not self.valid_sample_res(dict_sample_res):
+            losses['ctr1_loss'] = torch.zeros([1]).to(device)
+            ctr2_loss = self.ctr_loss_2(anchor_info['backbone_feature'], anchor_data['gt_bboxes'], anchor_data['gt_labels'])
+            losses.update(**ctr2_loss)
+            self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
+            return losses
+
+
         batch = anchor_sample_res[0].bboxes.size(0)
 
-        pos_inds_anchor = torch.zeros([0]).to(device).long()
         pos_gt_map_anchor = torch.zeros([0]).to(device).long()
         pos_gt_map_ctr = torch.zeros([0]).to(device).long()
         pos_labels_anchor = torch.zeros([0]).to(device).long()
         pos_labels_ctr = torch.zeros([0]).to(device).long()
+        anchor_proposal = []
+        dict_proposal = []
         for i, (res_anchor, res_ctr) in enumerate(zip(anchor_sample_res, dict_sample_res)):
-            pos_inds_anchor = torch.cat([pos_inds_anchor, (torch.arange(0, res_anchor.pos_inds.size(0)).to(device).long() + (i * batch)).view(-1)])
-            pos_gt_map_anchor = torch.cat([pos_gt_map_anchor, (res_anchor.pos_assigned_gt_inds + (i * batch)).view(-1)])
-            pos_gt_map_ctr = torch.cat([pos_gt_map_ctr, (res_ctr.pos_assigned_gt_inds + (i * batch)).view(-1)])
-            pos_labels_anchor = torch.cat([pos_labels_anchor, res_anchor.pos_gt_labels])
-            pos_labels_ctr = torch.cat([pos_labels_ctr, res_ctr.pos_gt_labels])
+            if len(res_anchor.pos_inds.size()) == 1 and len(res_ctr.pos_inds.size()) == 1:
+                pos_gt_map_anchor = torch.cat([pos_gt_map_anchor, (res_anchor.pos_assigned_gt_inds + (i * batch)).view(-1)])
+                pos_gt_map_ctr = torch.cat([pos_gt_map_ctr, (res_ctr.pos_assigned_gt_inds + (i * batch)).view(-1)])
+                pos_labels_anchor = torch.cat([pos_labels_anchor, res_anchor.pos_gt_labels])
+                pos_labels_ctr = torch.cat([pos_labels_ctr, res_ctr.pos_gt_labels])
+                anchor_proposal.append(res_anchor.pos_bboxes)
+                dict_proposal.append(res_ctr.pos_bboxes)
 
+        assert pos_gt_map_anchor.size(0) == pos_labels_anchor.size(0)
+        assert pos_gt_map_ctr.size(0) == pos_labels_ctr.size(0)
 
-        # student_proposal_rois = bbox2roi([res.pos_bboxes for res in anchor_sample_res])
-        # student_proposals = self.student.roi_head.bbox_roi_extractor(anchor_info['backbone_feature'][:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
-        # teacher_proposal_rois = bbox2roi([res.pos_bboxes for res in dict_sample_res])
-        # teacher_proposals = self.teacher.roi_head.bbox_roi_extractor(dict_info['backbone_feature'][:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois)
-        # if student_proposals.size(0) == 0 or teacher_proposals.size(0) == 0:
-        #     losses['ctr1'] = 0
-        # else:
-        #     student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
-        #     student_vec = F.normalize(student_vec, dim=1)
-        #     teacher_vec = self.teacher.projector(teacher_proposals.view(teacher_proposals.size(0), -1))
-        #     teacher_vec = F.normalize(teacher_vec, dim=1)
+        if len(pos_gt_map_anchor.size()) != 1 or pos_gt_map_anchor.size(0) == 0:
+            print(pos_gt_map_anchor)
+            losses['ctr1_loss'] = torch.zeros([1]).to(device)
+            self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
+        else:
+            anchor_proposal = bbox2roi(anchor_proposal)
+            dict_proposal = bbox2roi(dict_proposal)
+            ctr_proposal = torch.zeros([0, 5]).to(device)
 
-        #     ctr1_logit = torch.zeros(0, self.dim).to(device)
-        #     for i in range(pos_labels_anchor.size(0)):
-        #         pos_inds = pos_gt_map_ctr == pos_gt_map_anchor[i]
-        #         pos_logits = teacher_vec[pos_inds, :]
-        #         if pos_logits.size(0) == 0:
-        #             pos_inds = pos_gt_map_anchor == pos_gt_map_anchor[i]
-        #             pos_logits = student_vec[pos_inds, :]
-        #         rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
-        #         ctr1_logit = torch.cat([ctr1_logit, pos_logits])
+            # assert dict_proposal.size(0) == pos_gt_map_ctr.size(0)
+            for gt_map in pos_gt_map_anchor:
+                # pos_gt_map_ctr = torch.zeros([1]).to(device)
+                # print(pos_gt_map_ctr[5])
+                pos_inds = pos_gt_map_ctr == gt_map
+                pos_proposal = dict_proposal[pos_inds]
+                # if pos_proposal.size(0) == 0:
+                #     pos_inds = pos_gt_map_anchor == gt_map
+                #     pos_proposal = anchor_proposal[pos_inds]
+                rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
+                ctr_proposal = torch.cat([ctr_proposal, pos_proposal[rand_index]], dim=0)
+            ctr1_loss = self.ctr_loss_1(anchor_info['backbone_feature'], anchor_proposal, dict_info['backbone_feature'], ctr_proposal)
 
-        anchor_proposal = bbox2roi([res.pos_bboxes for res in anchor_sample_res])
-        dict_proposal = bbox2roi([res.pos_bboxes for res in dict_sample_res])
-        ctr_proposal = torch.zeros([0, 5]).to(device)
-        for gt_map in pos_gt_map_anchor:
-            pos_inds = pos_gt_map_ctr == gt_map
-            pos_proposal = dict_proposal[pos_inds]
-            # if pos_proposal.size(0) == 0:
-            #     pos_inds = pos_gt_map_anchor == gt_map
-            #     pos_proposal = anchor_proposal[pos_inds]
-            rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
-            ctr_proposal = torch.cat([ctr_proposal, pos_proposal[rand_index]], dim=0)
-
-        losses = dict()
-        ctr1_loss = self.ctr_loss_1(anchor_info['backbone_feature'], anchor_proposal, dict_info['backbone_feature'], ctr_proposal)
         losses.update(**ctr1_loss)
         ctr2_loss = self.ctr_loss_2(anchor_info['backbone_feature'], anchor_data['gt_bboxes'], anchor_data['gt_labels'])
         losses.update(**ctr2_loss)
         return losses
         
-
+    def valid_sample_res(self, sample_res):
+        for res in sample_res:
+            if res.pos_assigned_gt_inds.size(0) != res.pos_gt_labels.size(0) != res.pos_bboxes.size(0):
+                return False
+        return True
+        
         
 
-    def ctr_loss_1(self, student_feat, student_proposal, teacher_feat, teacher_proposal):
+    def ctr_loss_1(self, anchor_info, dict_info):
+        student_feat = anchor_info['backbone_feature']
+        teacher_feat = dict_info['backbone_feature']
         losses = dict()
         device = student_feat[0].device
-        student_proposal_rois = student_proposal
+
+        anchor_sample_res = anchor_info['sampling_results']
+        dict_sample_res = dict_info['sampling_results']
+
+        batch = anchor_sample_res[0].bboxes.size(0)
+
+        pos_gt_map_anchor = torch.zeros([0]).to(device).long()
+        pos_gt_map_ctr = torch.zeros([0]).to(device).long()
+        pos_labels_anchor = torch.zeros([0]).to(device).long()
+        pos_labels_ctr = torch.zeros([0]).to(device).long()
+        anchor_proposal = []
+        dict_proposal = []
+        for i, (res_anchor, res_ctr) in enumerate(zip(anchor_sample_res, dict_sample_res)):
+            assert res_anchor.pos_assigned_gt_inds.size(0) == res_anchor.pos_gt_labels.size(0) == res_anchor.pos_bboxes.size(0) != 0
+            assert res_ctr.pos_assigned_gt_inds.size(0) == res_ctr.pos_gt_labels.size(0) == res_ctr.pos_bboxes.size(0) != 0
+            pos_gt_map_anchor = torch.cat([pos_gt_map_anchor, (res_anchor.pos_assigned_gt_inds + (i * batch)).view(-1)])
+            pos_gt_map_ctr = torch.cat([pos_gt_map_ctr, (res_ctr.pos_assigned_gt_inds + (i * batch)).view(-1)])
+            pos_labels_anchor = torch.cat([pos_labels_anchor, res_anchor.pos_gt_labels])
+            pos_labels_ctr = torch.cat([pos_labels_ctr, res_ctr.pos_gt_labels])
+            anchor_proposal.append(res_anchor.pos_bboxes)
+            dict_proposal.append(res_ctr.pos_bboxes)
+
+        anchor_proposal = bbox2roi(anchor_proposal)
+        dict_proposal = bbox2roi(dict_proposal)
+        assert pos_gt_map_anchor.size(0) == pos_labels_anchor.size(0) == anchor_proposal.size(0)
+        assert pos_gt_map_ctr.size(0) == pos_labels_ctr.size(0) == dict_proposal.size(0)
+        ctr_proposal = torch.zeros([0, 5]).to(device)
+        for gt_map in pos_gt_map_anchor:
+            pos_inds = pos_gt_map_ctr == gt_map
+            pos_proposal = dict_proposal[pos_inds]
+            rand_index = torch.randint(low=0, high=pos_proposal.size(0), size=(1,))
+            ctr_proposal = torch.cat([ctr_proposal, pos_proposal[rand_index]], dim=0)
+
+        assert anchor_proposal.size(0) == ctr_proposal.size(0) and anchor_proposal.size(1) == ctr_proposal.size(1) == 5
+
+
+
+
+
+
+
+
+
+        student_proposal_rois = anchor_proposal
         student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
-        teacher_proposal_rois = teacher_proposal
+        teacher_proposal_rois = ctr_proposal
         teacher_proposals = self.teacher.roi_head.bbox_roi_extractor(teacher_feat[:self.teacher.roi_head.bbox_roi_extractor.num_inputs], teacher_proposal_rois)
         if student_proposals.size(0) == 0 or teacher_proposals.size(0) == 0:
-            losses['ctr1'] = torch.zeros([1]).to(device)
+            losses['ctr1_loss'] = torch.zeros([1]).to(device)
+            self._dequeue_and_enqueue(torch.zeros([0, 128]).to(device))
             return losses 
         student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
         student_vec = F.normalize(student_vec, dim=1)
@@ -372,7 +476,7 @@ class SoftTeacherBase(MultiSteamDetector):
         logits = torch.cat([pos_logits[:, None], neg_logits], dim=1)
         logits /= self.ctr1_T
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
-        losses['ctr1'] = F.cross_entropy(logits, labels)
+        losses['ctr1_loss'] = F.cross_entropy(logits, labels)
 
         self._dequeue_and_enqueue(teacher_vec)
 
@@ -381,10 +485,23 @@ class SoftTeacherBase(MultiSteamDetector):
     def ctr_loss_2(self, student_feat, pseudo_boxes, pseudo_labels):
         losses = dict()
         device = student_feat[0].device
-        student_proposal_rois = bbox2roi([stup for stup in pseudo_boxes])
+
+        assert len(pseudo_boxes) == len(pseudo_labels)
+
+        for i in range(len(pseudo_boxes)):
+            assert pseudo_boxes[i].size(0) == pseudo_labels[i].size(0) != 0
+            if pseudo_boxes[i].size(0) > self.ctr2_num:
+                rand_ind = torch.randint(low=0, high=pseudo_boxes[i].size(0), size=(self.ctr2_num,))
+                pseudo_boxes[i] = pseudo_boxes[i][rand_ind]
+                pseudo_labels[i] = pseudo_labels[i][rand_ind]
+        
+        assert student_feat[0].size(0) == len(pseudo_boxes)
+
+
+        student_proposal_rois = bbox2roi(pseudo_boxes)
         student_proposals = self.student.roi_head.bbox_roi_extractor(student_feat[:self.student.roi_head.bbox_roi_extractor.num_inputs], student_proposal_rois)
         if student_proposals.size(0) == 0:
-            losses['ctr2'] = torch.zeros([1]).to(device)
+            losses['ctr2_loss'] = torch.zeros([1]).to(device)
             return losses
         student_vec = self.student.projector(student_proposals.view(student_proposals.size(0), -1))
         student_vec = F.normalize(student_vec, dim=1)
@@ -411,7 +528,7 @@ class SoftTeacherBase(MultiSteamDetector):
         logits /= self.ctr2_T
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
         losses = dict()
-        losses['ctr2'] = F.cross_entropy(logits, labels)
+        losses['ctr2_loss'] = F.cross_entropy(logits, labels)
 
         # self._dequeue_and_enqueue(teacher_vec)
 

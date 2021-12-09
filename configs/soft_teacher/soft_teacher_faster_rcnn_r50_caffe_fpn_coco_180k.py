@@ -27,7 +27,7 @@ data = dict(
 )
 
 fold = 1
-percent = 1
+percent = 10
 
 work_dir = "work_dirs/${cfg_name}/${percent}/${fold}"
 log_config = dict(
