@@ -11,8 +11,6 @@ __pycache__/
 build
 #lib
 tests
-thirdparty
-thirdparty/
 
 #develop
 wandb

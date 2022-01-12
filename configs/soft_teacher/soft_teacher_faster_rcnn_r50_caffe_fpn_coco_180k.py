@@ -6,20 +6,19 @@ data = dict(
     workers_per_gpu=0,
     train=dict(
         sup=dict(
-            type="VOCDataset",
-            ann_file=data_root + "VOC2007/ImageSets/Main/trainval.txt",
-            img_prefix=data_root + "VOC2007/",
+            type="CocoDataset",
+            ann_file="/data/dya/workspace/cache/instances_train2017.1@10.json",
+            img_prefix="/data/dya/dataset/coco/train2017/",
         ),
         unsup=dict(
-            type="VOCDataset",
-            ann_file=data_root + "VOC2012/ImageSets/Main/trainval.txt",
-            img_prefix=data_root + "VOC2012/",
+            type="CocoDataset",
+            ann_file="/data/dya/workspace/cache/instances_train2017.1@10-unlabeled.json",
+            img_prefix="/data/dya/dataset/coco/train2017/",
         ),
     ),
     val=dict(
-        type="VOCDataset",
-        ann_file=data_root + "VOC2007/ImageSets/Main/test.txt",
-        img_prefix=data_root + "VOC2007/"
+        ann_file="/data/dya/dataset/coco/annotations/instances_val2017.json",
+        img_prefix="/data/dya/dataset/coco/val2017/",
     ),
     sampler=dict(
         train=dict(
@@ -33,19 +32,5 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type="TextLoggerHook"),
-        # dict(
-        #     type="WandbLoggerHook",
-        #     init_kwargs=dict(
-        #         project="pre_release",
-        #         name="${cfg_name}",
-        #         config=dict(
-        #             # fold="${fold}",
-        #             # percent="${percent}",
-        #             work_dirs="${work_dir}",
-        #             total_step="${runner.max_iters}",
-        #         ),
-        #     ),
-        #     by_epoch=False,
-        # ),
     ],
 )
